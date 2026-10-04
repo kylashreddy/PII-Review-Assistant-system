@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- App mark in the company's black-and-white style: the wordmark's corner bracket over
+       three lines of text, the middle one greyed out (a redacted line). -->
+  <rect x="100" y="100" width="824" height="824" rx="190" fill="#0a0a0a"/>
+  <path d="M600 260 H764 V424 H704 V320 H600 Z" fill="#fff"/>
+  <rect x="260" y="470" width="400" height="58" rx="10" fill="#fff"/>
+  <rect x="260" y="572" width="300" height="58" rx="10" fill="#6b6b6b"/>
+  <rect x="260" y="674" width="440" height="58" rx="10" fill="#fff"/>
+</svg>

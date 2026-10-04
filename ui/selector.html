@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>Select documents</title>
+<style>
+  /* black and white, like the company wordmark */
+  html, body { margin: 0; height: 100%; overflow: hidden; cursor: crosshair; user-select: none;
+    font: 14px/1.4 -apple-system, "Segoe UI", Inter, sans-serif; }
+  body { background: rgba(0, 0, 0, .40); }
+  .guide { position: fixed; top: 28px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px;
+    background: #0a0a0a; color: #fff; border: 1px solid #2a2a2a; padding: 12px 18px; border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.35);
+    cursor: default; white-space: nowrap; }
+  .guide .wordmark { width: 96px; height: 20px; background: url(../assets/wordmark-white.png) left center / contain no-repeat;
+    padding-right: 12px; border-right: 1px solid #2a2a2a; box-sizing: content-box; }
+  .steps { display: flex; gap: 6px; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700;
+    background: rgba(255,255,255,.12); color: #cbd5e1; }
+  .dot.on { background: #fff; color: #0a0a0a; }
+  .dot.done { background: #3a3a3a; color: #fff; }
+  .title { font-weight: 600; font-size: 15px; }
+  .sub { color: #a3a3a3; font-size: 12.5px; }
+  .guide button { border: 1px solid rgba(255,255,255,.2); background: transparent; color: #e2e8f0; border-radius: 8px;
+    padding: 5px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
+  .guide button:hover { background: rgba(255,255,255,.1); }
+  .box { position: fixed; border: 2px solid; border-radius: 6px; background: rgba(255,255,255,.06); pointer-events: none;
+    box-shadow: 0 0 0 9999px transparent; }
+  .box { border-color: #fff; background: rgba(255,255,255,.08); }
+  .box.right { border-style: dashed; }
+  .box span { position: absolute; top: -26px; left: -2px; color: #0a0a0a; background: #fff; font-size: 12px; font-weight: 700;
+    padding: 3px 8px; border-radius: 6px 6px 6px 0; }
+  .size { position: absolute; bottom: -24px; right: 0; font-size: 11px; color: #fff; background: #0a0a0a; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="guide" id="guide">
+  <span class="wordmark" role="img" aria-label="scaler ai labs"></span>
+  <div class="steps"><div class="dot s0" id="d0">1</div><div class="dot s1" id="d1">2</div></div>
+  <div>
+    <div class="title" id="title"></div>
+    <div class="sub" id="sub"></div>
+  </div>
+  <button id="back" hidden>Redo original</button>
+  <button id="cancel">Cancel · Esc</button>
+</div>
+<script src="selector.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "evaratus-review",
+  "productName": "Evaratus Review",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop PII review for Evaratus: reads the original and redacted documents from the screen and checks the redaction. Runs entirely on this computer.",
+  "main": "main.js",
+  "scripts": {
+    "prepare-app": "node scripts/sync-shared.js && node scripts/build-ocr.js",
+    "start": "npm run prepare-app && electron .",
+    "test": "node scripts/sync-shared.js && node --test 'test/*.test.js'",
+    "dist": "npm run prepare-app && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.evaratus.review",
+    "productName": "Evaratus Review",
+    "icon": "assets/icon.png",
+    "files": ["main.js", "preload.js", "src/**", "ui/**", "assets/**", "shared/**"],
+    "extraResources": [{ "from": "bin", "to": "bin" }, { "from": "ocr/ocr-win.ps1", "to": "bin/ocr-win.ps1" }],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg"],
+      "extendInfo": { "NSScreenCaptureUsageDescription": "Evaratus Review reads the two task documents you select on screen. Images never leave this computer." }
+    },
+    "win": { "target": ["nsis"] }
+  }
+}
