@@ -15,9 +15,9 @@ function box(cls, r) {
 window.evaratus.onDraw(({ marks, frames, flashId }) => {
   document.querySelectorAll('.mark, .frame').forEach((e) => e.remove());
   for (const f of frames) {
-    const el = box('frame ' + f.side, f);
+    const el = box('frame ' + f.side + (f.done ? ' done' : ''), f);
     const tag = document.createElement('span');
-    tag.textContent = f.side === 'left' ? 'Original' : 'Redacted';
+    tag.textContent = f.side === 'left' ? 'Original' : f.done ? '✓ Redaction done' : 'Redacted';
     el.append(tag);
     document.body.append(el);
   }

@@ -34,14 +34,19 @@ Screen Recording → turn on **Electron**, then run `npm start` again.
 
 ## Using it
 
-- **Live** re-reads the documents when they change — scroll through long documents and it keeps up.
+- **Scroll through both documents.** Each read is added to what was read before, so the app builds up the
+  whole document (labels included) and compares everything — not only what is on screen.
+- It compares only the part read on **both** sides. If one side is behind, it tells you which document to scroll.
+- Reads where the task is hidden (another window in front) are ignored; the last result stays.
+- Press **New task** when you move to the next task (a new task is also noticed automatically after a few reads).
+- **Live** re-reads the documents when they change.
 - **Marks** shows or hides the boxes on the documents. Click a finding to make its box pulse.
 - Answer each finding with the two buttons; the dashed one is the app's suggestion. **Details** shows why.
 - A highlight colour the app doesn't know appears under **Teach label colours** — pick its label once.
 
 ## Good to know
 
-- Only the **visible** part of each document is read.
+- Lines are matched by their text, so scroll at a normal pace: each read should overlap the previous one.
 - Text recognition can misread similar characters (0/O, 1/l). Check **Details** before acting.
 - Windows support is written but not tested yet.
 - To install on many computers, build an installer with `npm run dist` (it needs code signing for a company rollout).

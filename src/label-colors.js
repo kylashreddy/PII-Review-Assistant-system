@@ -39,7 +39,7 @@ function tintBehind(img, box) {
       if (hi >= 150 && hi - Math.min(...c) >= 12) tinted.push(c);
     }
   }
-  if (!total || tinted.length / total < 0.3) return null;
+  if (!total || tinted.length / total < 0.22) return null;
   const median = (k) => tinted.map((c) => c[k]).sort((a, b) => a - b)[tinted.length >> 1];
   return [median(0), median(1), median(2)];
 }
@@ -68,7 +68,7 @@ function matchLabel(tint, { learned = {}, palette = DEFAULT_PALETTE } = {}) {
   if (best) return best.label;
   for (const [label, hex] of Object.entries(palette)) {
     const { residual } = asTint(tint, hexToRgb(hex));
-    if (residual < 9 && (!best || residual < best.d)) best = { label, d: residual };
+    if (residual < 11 && (!best || residual < best.d)) best = { label, d: residual };
   }
   return best ? best.label : null;
 }
@@ -108,4 +108,39 @@ function findLabels(doc, img, options = {}) {
   return { spans: spans.filter((s) => s.text.trim()), unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
 }
 
-module.exports = { DEFAULT_PALETTE, tintBehind, matchLabel, findLabels, asTint, hexToRgb, rgbToHex };
+/**
+ * Labels on each row of one read, kept on the row (row.labels, offsets within the row) so
+ * they are remembered after the row scrolls out of view. Returns the unknown colours.
+ */
+function labelRows(rowList, img, options = {}) {
+  const unknown = new Map();
+  for (const row of rowList) {
+    const found = findLabels({ text: row.text, words: row.words.filter((w) => w.box) }, img, options);
+    row.labels = found.spans.map(({ siteLabel, start, end }) => ({ siteLabel, start, end }));
+    for (const u of found.unknown) {
+      const cur = unknown.get(u.hex) || { ...u, count: 0, example: u.example };
+      cur.count += u.count;
+      unknown.set(u.hex, cur);
+    }
+  }
+  return [...unknown.values()].sort((a, b) => b.count - a.count);
+}
+
+/** Row labels -> labeled spans in the joined text; a label running on to the next row stays one span. */
+function spansFromRows(rowList, joined) {
+  const spans = [];
+  rowList.forEach((row, r) => {
+    for (const l of row.labels || []) {
+      const start = joined.rowStarts[r] + l.start;
+      const end = joined.rowStarts[r] + l.end;
+      const prev = spans[spans.length - 1];
+      const prevRowEnd = r > 0 ? joined.rowStarts[r - 1] + rowList[r - 1].text.length : -1;
+      if (prev && prev.siteLabel === l.siteLabel && l.start === 0 && prev.end === prevRowEnd) prev.end = end;
+      else spans.push({ siteLabel: l.siteLabel, start, end });
+    }
+  });
+  for (const s of spans) s.text = joined.text.slice(s.start, s.end);
+  return spans;
+}
+
+module.exports = { DEFAULT_PALETTE, tintBehind, matchLabel, findLabels, labelRows, spansFromRows, asTint, hexToRgb, rgbToHex };

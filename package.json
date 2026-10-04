@@ -7,7 +7,7 @@
   "main": "main.js",
   "scripts": {
     "prepare-app": "node scripts/sync-shared.js && node scripts/build-ocr.js",
-    "start": "npm run prepare-app && electron .",
+    "start": "npm run prepare-app && node scripts/launch.js",
     "test": "node scripts/sync-shared.js && node --test 'test/*.test.js'",
     "dist": "npm run prepare-app && electron-builder"
   },
@@ -19,13 +19,37 @@
     "appId": "com.evaratus.review",
     "productName": "Evaratus Review",
     "icon": "assets/icon.png",
-    "files": ["main.js", "preload.js", "src/**", "ui/**", "assets/**", "shared/**"],
-    "extraResources": [{ "from": "bin", "to": "bin" }, { "from": "ocr/ocr-win.ps1", "to": "bin/ocr-win.ps1" }],
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**",
+      "ui/**",
+      "assets/**",
+      "shared/**"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin"
+      },
+      {
+        "from": "ocr/ocr-win.ps1",
+        "to": "bin/ocr-win.ps1"
+      }
+    ],
     "mac": {
       "category": "public.app-category.productivity",
-      "target": ["dmg"],
-      "extendInfo": { "NSScreenCaptureUsageDescription": "Evaratus Review reads the two task documents you select on screen. Images never leave this computer." }
+      "target": [
+        "dmg"
+      ],
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "Evaratus Review reads the two task documents you select on screen. Images never leave this computer."
+      }
     },
-    "win": { "target": ["nsis"] }
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
   }
 }

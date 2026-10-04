@@ -47,6 +47,7 @@ function render() {
   const scrollTop = main.scrollTop;
   main.replaceChildren(...view().filter(Boolean));
   main.scrollTop = scrollTop;
+  if (ui.result && ui.state && ui.state.regions) announce();
   renderLivePill();
   const s = ui.state;
   document.getElementById('engine').textContent = s ? `OCR: ${s.engine}` : '';
@@ -63,7 +64,7 @@ function view() {
     out.push(ui.status === 'reading' || ui.status === 'idle' ? h('div', { class: 'skeleton' }) : null);
     return out;
   }
-  out.push(summaryCard(), taskNotice(r), coloursCard(r), filterChips(), ...sections());
+  out.push(doneCard(), summaryCard(), taskNotice(r), coloursCard(r), filterChips(), ...sections());
   return out;
 }
 
@@ -86,7 +87,7 @@ function permissionCard() {
     h('div', { class: 'kicker' }, 'Evaratus Review'),
     h('h1', {}, 'Allow screen reading'),
     h('p', {}, 'macOS needs your permission before Evaratus Review can read the documents on screen. ' +
-      'Turn on Evaratus Review under Privacy & Security → Screen Recording, then reopen the app.'),
+      'Turn on Electron (Evaratus Review once installed) under Privacy & Security → Screen Recording, then quit and start the app again.'),
     h('button', { class: 'btn primary big', onclick: () => api.openPermissions() }, 'Open Screen Recording settings'),
     h('p', { style: 'margin-top:14px;font-size:12px' }, 'The screen is only read inside the two boxes you select, and nothing leaves this computer.'));
 }
@@ -106,11 +107,24 @@ function documentsCard() {
       stageButton('L2', 'L2 · Verify', 'Is it redacted right?')),
     h('div', { class: 'controls' },
       h('button', { class: 'btn', onclick: () => api.pickRegions() }, '⌖ Reselect'),
-      h('button', { class: 'btn', onclick: () => api.scan(), disabled: ui.status === 'reading' }, ui.status === 'reading' ? 'Reading…' : '⟳ Read now'),
+      h('button', { class: 'btn', onclick: () => api.scan(), disabled: ui.status === 'reading' }, ui.status === 'reading' ? 'Reading…' : '⟳ Read'),
+      h('button', { class: 'btn', onclick: () => api.newTask(), title: 'Forget what was read and start reading the next task' }, 'New task'),
       h('span', { class: 'spacer' }),
       toggle('Live', s.live, () => api.set({ live: !s.live }), 'Re-read the documents whenever they change (e.g. when you scroll)'),
       toggle('Marks', s.overlay, () => api.set({ overlay: !s.overlay }), 'Draw boxes around findings on the documents')),
-    r ? h('div', { class: 'meta' }, `Read ${ago(r.readAt)} · ${(r.totalMs / 1000).toFixed(1)} s · only the visible part of each document`) : null);
+    r ? coverage(r) : null);
+}
+
+/** How much of each document has been read, and how much of it could be compared. */
+function coverage(r) {
+  const c = r.coverage;
+  if (!c) return h('div', { class: 'meta' }, `Read ${ago(r.readAt)}`);
+  const behind = c.notComparedLeft > c.notComparedRight ? 'redacted' : 'original';
+  const gap = Math.max(c.notComparedLeft, c.notComparedRight);
+  return h('div', { class: 'coverage' },
+    h('div', { class: 'meta' }, `Read so far: original ${c.leftRows} lines · redacted ${c.rightRows} lines · compared ${c.comparedLeft} lines · ${ago(r.readAt)}`),
+    gap > 0 ? h('div', { class: 'meta strong' }, `${gap} line${gap === 1 ? '' : 's'} read on one side only — scroll the ${behind} document to the same place to compare them.`)
+      : h('div', { class: 'meta' }, 'Scroll through both documents to read them in full; new lines are added as they appear.'));
 }
 
 function stageButton(stage, title, sub) {
@@ -125,6 +139,10 @@ function statusNotice() {
     return h('div', { class: 'notice warn' }, h('div', { class: 'ic' }, '⚠'),
       h('div', {}, h('b', {}, 'The selected areas look empty'), h('p', {}, 'Is the task still open where you selected it? Reselect the documents if the window moved.')));
   }
+  if (ui.status === 'away') {
+    return h('div', { class: 'notice' }, h('div', { class: 'ic' }, '◌'),
+      h('div', {}, h('b', {}, 'The boxes don\u2019t show the task right now'), h('p', {}, 'Bring the task back in front. The last result is kept; a new task is picked up automatically after a few reads.')));
+  }
   if (ui.status === 'error') {
     return h('div', { class: 'notice error' }, h('div', { class: 'ic' }, '⚠'),
       h('div', {}, h('b', {}, 'Could not read the screen'), h('p', {}, ui.error)));
@@ -137,23 +155,86 @@ function stageFindings() {
 }
 function decidable(f) { return Boolean(D.question(f, ui.state.stage)); }
 
+/**
+ * Is the task done? (stage L2: the redaction on the right; L1: the labels.)
+ *   'done'      nothing to fix was found
+ *   'reviewed'  findings were raised, the reviewer answered all of them, and none needs a fix
+ *   'fix'       the reviewer's answers say something must be fixed on the right
+ *   'open'      findings still to look at
+ * Task-level notes (other language, unstructured text) and text added or missing on the
+ * right are problems in their own right, so they keep a task from being done.
+ */
+function completion() {
+  const stage = ui.state.stage;
+  const findings = stageFindings();
+  const issues = findings.filter(D.isIssue);
+  const blocking = issues.filter((f) => !decidable(f));          // nothing to answer: must be fixed
+  const t = D.summary(findings, stage, ui.verdicts);
+  const c = ui.result.coverage || {};
+  const oneSided = Math.max(c.notComparedLeft || 0, c.notComparedRight || 0);
+  const okCount = findings.length - issues.length;
+  let state;
+  if (!issues.length) state = 'done';
+  else if (blocking.length || t.fix) state = 'fix';
+  else if (issues.every((f) => ui.verdicts.has(f.id))) state = 'reviewed';
+  else state = 'open';
+  return { state, okCount, fixes: t.fix + blocking.length, oneSided, lines: c.comparedLeft || 0 };
+}
+
+function doneCard() {
+  const c = completion();
+  if (c.state !== 'done' && c.state !== 'reviewed') return null;
+  const stage = ui.state.stage;
+  const what = stage === 'L1' ? 'Identification done' : 'Redaction done';
+  const detail = stage === 'L1'
+    ? `All PII (personal and business) in the original is labeled — ${c.okCount} value${c.okCount === 1 ? '' : 's'}.`
+    : `All PII and business PII on the right is redacted correctly — ${c.okCount} value${c.okCount === 1 ? '' : 's'} replaced consistently.`;
+  return h('div', { class: 'done-card' },
+    h('div', { class: 'done-mark' }, '✓'),
+    h('div', {},
+      h('div', { class: 'done-title' }, what + (c.state === 'reviewed' ? ' (after your review)' : '')),
+      h('div', { class: 'done-text' }, detail),
+      h('div', { class: 'done-scope' }, c.oneSided
+        ? `Checked ${c.lines} lines. ${c.oneSided} more line${c.oneSided === 1 ? ' was' : 's were'} read on one side only — scroll both documents to the end before submitting.`
+        : `Checked the ${c.lines} lines read on both sides. Make sure you scrolled both documents to the end, then submit on the site.`)));
+}
+
 function summaryCard() {
   const stage = ui.state.stage;
   const findings = stageFindings();
-  const open = findings.filter(D.isIssue);
-  const ok = findings.length - open.length;
+  const issues = findings.filter(D.isIssue);
+  // Still to look at: issues not answered yet, and issues there is nothing to answer for.
+  const open = issues.filter((f) => !decidable(f) || !ui.verdicts.has(f.id));
+  const ok = findings.length - issues.length;
   const t = D.summary(findings, stage, ui.verdicts);
   const total = findings.filter(decidable).length;
   const answered = total - t.open;
   return h('div', { class: 'card' },
     h('div', { class: 'summary' },
       h('div', { class: 'big-num' + (open.length ? '' : ' zero') }, String(open.length)),
-      h('div', {}, h('div', { style: 'font-weight:700' }, open.length ? 'to check' : 'Nothing to check'),
+      h('div', {}, h('div', { style: 'font-weight:700' }, open.length ? 'left to check' : issues.length ? 'All checked' : 'Nothing to check'),
         h('div', { class: 'what' }, stage === 'L1' ? 'PII in the original, against the labels' : 'Redacted work, against the original')),
       h('div', { class: 'ok' }, h('b', {}, String(ok)), h('div', { class: 'what' }, stage === 'L1' ? 'identified' : 'redacted right'))),
     h('div', { class: 'progress' }, h('i', { style: `width:${total ? Math.round((answered / total) * 100) : 0}%` })),
     h('div', { class: 'decided-line' }, h('span', {}, `${answered} of ${total} answered`),
       h('span', {}, t.fix ? `${t.fix} to fix on the right` : answered ? 'No fixes so far' : '')));
+}
+
+// Tell the reviewer (and the marks on screen) when the task becomes done, once per task.
+let announced = '';
+function announce() {
+  if (!ui.result || !ui.state) return;
+  const c = completion();
+  const done = c.state === 'done' || c.state === 'reviewed';
+  api.setDone(done);
+  const key = `${ui.taskKey}|${ui.state.stage}`;
+  if (!done) { if (announced === key) announced = ''; return; }
+  if (announced === key) return;
+  announced = key;
+  const title = ui.state.stage === 'L1' ? 'Identification done' : 'Redaction done';
+  try {
+    new Notification(title, { body: c.oneSided ? 'Scroll both documents to the end to be sure, then submit on the site.' : 'All PII is handled. You can submit on the site.', silent: false });
+  } catch (e) { /* notifications not allowed: the card in the window still shows it */ }
 }
 
 function taskNotice(r) {
@@ -282,15 +363,19 @@ function demoBridge() {
   const state = { regions: null, stage: 'L2', live: true, overlay: true, learnedColours: {}, engine: 'Apple Vision (demo)', platform: 'darwin', access: 'granted' };
   const emit = (k, v) => listeners[k].forEach((fn) => fn(v));
   const params = new URLSearchParams(location.search);
-  const loadDemo = () => fetch('demo-data.json').then((r) => r.json()).then((r) => { emit('result', { ...r, readAt: Date.now() }); });
+  const loadDemo = () => fetch('demo-data.json').then((r) => r.json()).then((r) => {
+    // ?demo=done: the same task with every redaction correct.
+    if (params.get('demo') === 'done') r.L2.findings = r.L2.findings.filter((f) => f.category === 'REDACTED_OK');
+    emit('result', { ...r, readAt: Date.now(), coverage: { leftRows: 7, rightRows: 7, comparedLeft: 7, comparedRight: 7, notComparedLeft: 0, notComparedRight: 0 } });
+  });
   return {
     ready() {
-      if (params.get('demo') === 'result') { state.regions = { left: { width: 620, height: 780 }, right: { width: 620, height: 780 } }; loadDemo(); }
+      if (params.get('demo') === 'result' || params.get('demo') === 'done') { state.regions = { left: { width: 620, height: 780 }, right: { width: 620, height: 780 } }; loadDemo(); }
       if (params.get('demo') === 'permission') state.access = 'denied';
       emit('state', { ...state });
     },
     pickRegions() { state.regions = { left: { width: 620, height: 780 }, right: { width: 620, height: 780 } }; emit('state', { ...state }); loadDemo(); },
-    showRegions() {}, scan() { loadDemo(); }, decided() {}, flash() {}, learnColour() {}, forgetColours() {}, openPermissions() {},
+    showRegions() {}, scan() { loadDemo(); }, newTask() { loadDemo(); }, setDone() {}, decided() {}, flash() {}, learnColour() {}, forgetColours() {}, openPermissions() {},
     set(patch) { Object.assign(state, patch); emit('state', { ...state }); },
     palette: async () => ({ 'Person Name': '#2563eb', 'Email Address': '#16a34a', 'Contact Number': '#f97316', 'Business Name': '#14b8a6' }),
     onState: (fn) => listeners.state.push(fn), onResult: (fn) => listeners.result.push(fn), onStatus: (fn) => listeners.status.push(fn),

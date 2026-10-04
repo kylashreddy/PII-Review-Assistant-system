@@ -1,5 +1,5 @@
-// OCR lines -> one document text, with every word's box so any part of the text can
-// be found on screen again.
+// OCR lines -> rows -> one document text, with every word's box so any part of the
+// text can be found on screen again.
 //
 // Lines on the same row ("Email: …      Phone: …") are joined with a space, rows
 // with a line break, and a larger vertical gap starts a new paragraph.
@@ -27,18 +27,15 @@ function rows(lines) {
 }
 
 /**
- * @param ocr {width, height, lines:[{text, box:[x,y,w,h], words:[{text, box}]}]}
- * @returns {text, words:[{start, end, box, row}]}  boxes in the image's pixels
+ * One OCR read -> rows of text: [{text, words:[{start, end, box}], para, top, bottom, clipped}]
+ * `para` = a paragraph starts at this row. `clipped` = the row touches the top or bottom
+ * edge of the read area, so it may be cut in half.
  */
-function buildText(ocr) {
-  let text = '';
-  const words = [];
+function snapshotRows(ocr) {
   const rs = rows(ocr.lines || []);
-  rs.forEach((row, r) => {
-    if (r > 0) {
-      const gap = row.top - rs[r - 1].bottom;
-      text += gap > Math.min(row.height, rs[r - 1].height) * 0.9 ? '\n\n' : '\n';
-    }
+  return rs.map((row, r) => {
+    let text = '';
+    const words = [];
     row.lines.forEach((line, i) => {
       if (i > 0) text += ' ';
       const base = text.length;
@@ -47,19 +44,47 @@ function buildText(ocr) {
       for (const w of line.words || []) {
         const at = line.text.indexOf(w.text, cursor);
         if (at < 0) continue;
-        words.push({ start: base + at, end: base + at + w.text.length, box: w.box, row: r });
+        words.push({ start: base + at, end: base + at + w.text.length, box: w.box });
         cursor = at + w.text.length;
       }
     });
+    const prev = rs[r - 1];
+    const para = Boolean(prev && row.top - prev.bottom > Math.min(row.height, prev.height) * 0.9);
+    const edge = Math.max(2, row.height * 0.15);
+    const clipped = ocr.height ? row.top <= edge || row.bottom >= ocr.height - edge : false;
+    return { text, words, para, top: row.top, bottom: row.bottom, clipped };
   });
-  return { text, words };
+}
+
+/**
+ * Rows -> {text, words:[{start, end, box, row}], rowStarts}. Words without a box (rows
+ * not on screen right now) keep their place in the text but cannot be marked.
+ */
+function joinRows(rowList) {
+  let text = '';
+  const words = [];
+  const rowStarts = [];
+  rowList.forEach((row, r) => {
+    if (r > 0) text += row.para ? '\n\n' : '\n';
+    rowStarts.push(text.length);
+    for (const w of row.words) {
+      if (w.box) words.push({ start: text.length + w.start, end: text.length + w.end, box: w.box, row: r });
+    }
+    text += row.text;
+  });
+  return { text, words, rowStarts };
+}
+
+/** OCR read -> {text, words}: all rows, as they are on screen. */
+function buildText(ocr) {
+  return joinRows(snapshotRows(ocr));
 }
 
 /** Boxes covering text[start, end): one per row, in image pixels. */
 function boxesFor(words, start, end) {
   const byRow = new Map();
   for (const w of words) {
-    if (w.end <= start || w.start >= end) continue;
+    if (!w.box || w.end <= start || w.start >= end) continue;
     const b = byRow.get(w.row);
     const [x, y, wd, ht] = w.box;
     if (!b) byRow.set(w.row, [x, y, x + wd, y + ht]);
@@ -68,4 +93,4 @@ function boxesFor(words, start, end) {
   return [...byRow.values()].map(([x1, y1, x2, y2]) => [x1, y1, x2 - x1, y2 - y1]);
 }
 
-module.exports = { buildText, boxesFor, rows };
+module.exports = { buildText, boxesFor, rows, snapshotRows, joinRows };
