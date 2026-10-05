@@ -29,7 +29,8 @@ func png(_ image: CGImage) -> Data {
   return data as Data
 }
 
-let done = DispatchSemaphore(value: 0)
+// The main thread keeps running (dispatchMain) so ScreenCaptureKit can deliver its results;
+// blocking it would deadlock. The task exits the process when done.
 Task {
   do {
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -52,10 +53,10 @@ Task {
     }
     let json = try JSONSerialization.data(withJSONObject: ["images": images])
     FileHandle.standardOutput.write(json)
-    done.signal()
+    exit(0)
   } catch {
     // The usual cause: Screen Recording permission not given yet.
     fail("capture failed: \(error.localizedDescription)", 2)
   }
 }
-done.wait()
+dispatchMain()

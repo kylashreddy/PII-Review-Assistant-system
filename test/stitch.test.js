@@ -17,15 +17,32 @@ test('scrolling down and up builds the whole document once', () => {
   assert.deepEqual(text(st), DOC);
 });
 
-test('a read that matches nothing is ignored; three in a row start a new task', () => {
+test('a read that matches nothing is kept as its own piece (nothing is lost)', () => {
+  const st = new Stitcher();
+  st.add(view(0, 6));
+  assert.equal(st.add(view(15, 5)), 'merged');
+  assert.deepEqual(text(st), [...DOC.slice(0, 6), ...DOC.slice(15, 20)]);
+});
+
+test('with mayStartOver, reads that match nothing three times start a new document', () => {
   const st = new Stitcher();
   st.add(view(0, 6));
   const other = Array.from({ length: 10 }, (_, i) => `Another task row ${i} with different words entirely`);
-  assert.equal(st.add(view(0, 5, other)), 'ignored');
-  assert.deepEqual(text(st), DOC.slice(0, 6), 'the document is kept');
-  assert.equal(st.add(view(0, 5, other)), 'ignored');
-  assert.equal(st.add(view(0, 5, other)), 'new');
+  assert.equal(st.add(view(0, 5, other), { mayStartOver: true }), 'ignored');
+  assert.equal(st.add(view(0, 5, other), { mayStartOver: true }), 'ignored');
+  assert.equal(st.add(view(0, 5, other), { mayStartOver: true }), 'new');
   assert.deepEqual(text(st), other.slice(0, 5));
+});
+
+test('fast scrolling: separate pieces join up when a later read connects them', () => {
+  const st = new Stitcher();
+  st.add(view(0, 6));      // rows 0-5
+  st.add(view(12, 6));     // rows 12-17: no overlap, its own piece
+  st.add(view(5, 8));      // rows 5-12: connects both
+  assert.deepEqual(text(st), DOC.slice(0, 18));
+  st.add(view(24, 6));     // another jump
+  st.add(view(17, 8));     // rows 17-24: connects again
+  assert.deepEqual(text(st), DOC.slice(0, 30));
 });
 
 test('an almost empty read (window switching) is ignored', () => {
@@ -78,10 +95,17 @@ test('the same line read slightly differently still lines up', () => {
   assert.equal(st.document().length, 9);
 });
 
-test('the redacted side does not start over on its own', () => {
+test('the document never starts over on its own', () => {
   const st = new Stitcher();
   st.add(view(0, 6));
   const other = Array.from({ length: 6 }, (_, i) => `Completely different content row ${i} for another page`);
-  for (let k = 0; k < 5; k++) assert.equal(st.add(view(0, 6, other), { mayStartOver: false }), 'ignored');
-  assert.deepEqual(text(st), DOC.slice(0, 6));
+  for (let k = 0; k < 5; k++) st.add(view(0, 6, other));
+  assert.deepEqual(text(st).slice(0, 6), DOC.slice(0, 6), 'what was read is kept');
+});
+
+test('paging down: a read that does not overlap is added after, not lost', () => {
+  const st = new Stitcher();
+  st.add(view(0, 6));
+  assert.equal(st.add(view(10, 6)), 'merged');
+  assert.deepEqual(text(st), [...DOC.slice(0, 6), ...DOC.slice(10, 16)]);
 });

@@ -23,10 +23,12 @@ function runMac(png, scale) {
     const child = spawn(path.join(binDir(), 'ocr-mac'), ['--scale', String(scale)]);
     const out = [];
     const err = [];
+    const timer = setTimeout(() => { child.kill(); reject(new Error('text recognition took too long (over 30 s)')); }, 30000);
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => err.push(d));
     child.on('error', reject);
     child.on('close', (code) => {
+      clearTimeout(timer);
       if (code !== 0) return reject(new Error(Buffer.concat(err).toString() || `OCR exited with ${code}`));
       try { resolve(JSON.parse(Buffer.concat(out).toString())); } catch (e) { reject(e); }
     });

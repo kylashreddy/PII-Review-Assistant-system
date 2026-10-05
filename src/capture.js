@@ -16,17 +16,22 @@ function helper() {
 }
 
 function grabMac(regions) {
-  const rects = [regions.left, regions.right];
+  const rects = [regions.left, regions.right, ...(regions.header ? [regions.header] : [])];
+  return captureRects(rects).then((shots) => ({ left: shots[0], right: shots[1], header: shots[2] || null }));
+}
+
+/** macOS: capture any rectangles (screen points) -> [{image, rect, scale}]. */
+function captureRects(rects) {
   return new Promise((resolve, reject) => {
-    execFile(helper(), [String(process.pid), JSON.stringify(rects)], { maxBuffer: 512 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(helper(), [String(process.pid), JSON.stringify(rects)], { maxBuffer: 512 * 1024 * 1024, timeout: 15000 }, (err, stdout, stderr) => {
       if (err) {
         const e = new Error((stderr || err.message).trim());
         if (err.code === 2) e.code = 'permission';
+        if (err.killed) e.message = 'Screen capture did not answer. macOS may be showing a screen-recording dialog — click Allow, then try again.';
         return reject(e);
       }
       const { images } = JSON.parse(stdout);
-      const shot = (i) => ({ image: nativeImage.createFromBuffer(Buffer.from(images[i].png, 'base64')), rect: rects[i], scale: images[i].scale });
-      resolve({ left: shot(0), right: shot(1) });
+      resolve(images.map((img, i) => ({ image: nativeImage.createFromBuffer(Buffer.from(img.png, 'base64')), rect: rects[i], scale: img.scale })));
     });
   });
 }
@@ -66,6 +71,13 @@ async function grab(regions) {
   return out;
 }
 
+/** The whole work area of a display (screen points) as one image, for finding the documents. */
+async function grabArea(rect) {
+  if (process.platform === 'darwin') return (await captureRects([rect]))[0];
+  const both = await grab({ left: rect, right: rect });
+  return both.left;
+}
+
 /** True when the captured screen is empty: macOS without Screen Recording permission shows only the wallpaper. */
 function looksBlank(image) {
   const { width, height } = image.getSize();
@@ -79,4 +91,4 @@ function looksBlank(image) {
   return width === 0 || height === 0 || max - min < 8;
 }
 
-module.exports = { grab, looksBlank };
+module.exports = { grab, grabArea, looksBlank };

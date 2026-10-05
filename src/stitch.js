@@ -3,8 +3,9 @@
 // Each read shows a window onto the document. Its rows are matched to the rows read
 // before (same text = same row), so the read can be placed: rows above are added at
 // the top, rows below at the bottom, rows on screen are refreshed (with their boxes and
-// labels). A read that matches nothing is ignored — another window was in front, or
-// the page was switching — unless it keeps happening, which means a new task.
+// labels). A read that matches nothing (fast scrolling left no overlap) is kept too, as
+// a separate piece after the rest, so no part of the document is lost; when a later read
+// overlaps it, it is joined in. A new task is noticed elsewhere (the pane's file name).
 'use strict';
 
 const key = (text) => text.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '');
@@ -37,6 +38,7 @@ class Stitcher {
     this.rows = [];     // {text, key, words, para, labels, seen}
     this.misses = 0;
     this.reads = 0;
+    this.pieces = 1;
   }
 
   /** Where the read's rows sit in the document: offset d (document row = read row + d), or null. */
@@ -64,11 +66,12 @@ class Stitcher {
 
   /**
    * Add one read (rows from text-layout.snapshotRows, with row.labels).
-   * mayStartOver: false keeps the document even after many reads that do not match
-   * (the redacted side follows the original: only a new original means a new task).
+   * appendIfNoMatch (default): a read that matches nothing is kept, after the rest.
+   * mayStartOver: instead, start a new document after a few reads that match nothing
+   * (only when there is no better sign of a new task).
    * @returns {'new'|'merged'|'ignored'}
    */
-  add(snapshot, { mayStartOver = true } = {}) {
+  add(snapshot, { mayStartOver = false, appendIfNoMatch = true } = {}) {
     const readRows = snapshot.filter((r) => !r.clipped && r.text.trim()).map((r) => ({ ...r, key: key(r.text) }));
     const chars = readRows.reduce((n, r) => n + r.text.length, 0);
     for (const r of this.rows) r.onScreen = false;
@@ -76,6 +79,13 @@ class Stitcher {
 
     if (!this.rows.length) return this.start(readRows);
     const d = this.place(readRows);
+    if (d == null && appendIfNoMatch && !mayStartOver) {
+      // No overlap with what was read (fast scrolling, a page jump): keep it as its own piece.
+      this.misses = 0;
+      this.pieces++;
+      this.rows.push(...readRows.map((r) => this.fresh(r, this.pieces)));
+      return 'merged';
+    }
     if (d == null) {
       this.misses++;
       if (mayStartOver && this.misses >= NEW_TASK_AFTER) return this.start(readRows);
@@ -83,32 +93,65 @@ class Stitcher {
     }
     this.misses = 0;
     this.reads++;
-    // Rows above the known part go first, then the known rows, then rows below.
-    const above = Math.max(0, -d);
-    if (above) this.rows.unshift(...readRows.slice(0, above).map((r) => this.fresh(r)));
-    const shift = d + above;
-    readRows.forEach((r, i) => {
-      const j = i + shift;
-      if (j < this.rows.length) {
-        const old = this.rows[j];
-        // The first row of a read has no row above it on screen, so its paragraph break is unknown.
-        this.rows[j] = { ...this.fresh(r), para: i === 0 ? old.para : r.para };
-      } else {
-        this.rows.push(this.fresh(r));
-      }
-    });
+    this.merge(readRows, d);
     return 'merged';
+  }
+
+  /**
+   * Put a placed read into the document. It is anchored in one piece; its rows inside that
+   * piece refresh the rows there, rows beyond it extend the piece — and where they meet the
+   * next (or previous) piece, the two pieces join instead of overwriting each other.
+   */
+  merge(readRows, d) {
+    const same = (row, r) => row.key === r.key || sameLine(row.key, r.key);
+    const votes = new Map();
+    readRows.forEach((r, i) => { const row = this.rows[i + d]; if (row && same(row, r)) votes.set(row.piece, (votes.get(row.piece) || 0) + 1); });
+    const piece = [...votes].sort((a, b) => b[1] - a[1])[0][0];
+    const pStart = this.rows.findIndex((r) => r.piece === piece);
+    let pEnd = pStart;
+    while (pEnd + 1 < this.rows.length && this.rows[pEnd + 1].piece === piece) pEnd++;
+    const join = (other) => { for (const r of this.rows) if (r.piece === other) r.piece = piece; };
+    const refresh = (k, r, keepPara) => {
+      const old = this.rows[k];
+      this.rows[k] = { ...this.fresh(r, piece), para: keepPara ? old.para : r.para };
+    };
+
+    const before = [];
+    const inside = [];
+    const after = [];
+    readRows.forEach((r, i) => {
+      const j = i + d;
+      if (j < pStart) before.push(r); else if (j > pEnd) after.push(r); else inside.push([j, r, i === 0]);
+    });
+    for (const [j, r, first] of inside) refresh(j, r, first);   // the first row's paragraph break is unknown
+
+    let k = pEnd + 1;   // rows below the piece
+    for (const r of after) {
+      const row = this.rows[k];
+      if (row && row.piece === piece) refresh(k, r, false);
+      else if (row && same(row, r)) { join(row.piece); refresh(k, r, false); }
+      else this.rows.splice(k, 0, this.fresh(r, piece));
+      k++;
+    }
+    k = pStart - 1;     // rows above the piece, bottom up
+    for (let n = before.length - 1; n >= 0; n--) {
+      const r = before[n];
+      const row = k >= 0 ? this.rows[k] : null;
+      if (row && row.piece === piece) { refresh(k, r, false); k--; }
+      else if (row && same(row, r)) { join(row.piece); refresh(k, r, false); k--; }
+      else this.rows.splice(k + 1, 0, this.fresh(r, piece));
+    }
   }
 
   start(readRows) {
     this.reset();
     this.reads = 1;
-    this.rows = readRows.map((r) => this.fresh(r));
+    this.rows = readRows.map((r) => this.fresh(r, 1));
     return 'new';
   }
 
-  fresh(r) {
-    return { text: r.text, key: r.key, words: r.words, para: r.para, labels: r.labels || [], onScreen: true };
+  fresh(r, piece) {
+    return { text: r.text, key: r.key, words: r.words, para: r.para, labels: r.labels || [], onScreen: true, piece };
   }
 
   /** Rows for the whole document so far; rows not on screen keep their text and labels but no boxes. */

@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('evaratus', {
   // main window
   ready: () => ipcRenderer.invoke('app:ready'),
   pickRegions: () => ipcRenderer.invoke('app:pick'),
+  findDocuments: () => ipcRenderer.invoke('app:find'),
+  readAll: () => ipcRenderer.invoke('app:read-all'),
   showRegions: () => ipcRenderer.invoke('app:show-regions'),
   scan: () => ipcRenderer.invoke('app:scan'),
   newTask: () => ipcRenderer.invoke('app:new-task'),

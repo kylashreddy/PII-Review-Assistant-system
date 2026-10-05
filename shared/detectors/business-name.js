@@ -35,6 +35,9 @@
     'business mechanical electrical electronic civil chemical biomedical industrial engineering education legal banking ' +
     'customer it cloud web mobile network security').split(' '));
 
+  // Software products ending in a company-like word: tools on a CV, not employers.
+  const PRODUCTS = /^(?:Visual|Android|Xcode|SQL|Power|Google|Microsoft|Adobe|Unity|Creative|Data|Cloud|Developer|Expo|R)\s+(?:Studio|Server|Labs?|Services|Systems|Technologies|Tech|Media)$/i;
+
   // Capitalised words that start a sentence rather than a company name.
   const LEAD_STOP = new Set(('the a an at in on for from with by to and of our your this that these those dear mr mrs ms dr hi hello ' +
     'employer company client vendor via per as is was we i he she they it my his her their contact call visit please').split(' '));
@@ -60,6 +63,7 @@
       if (!nonSuffix.length) return null;
       const legal = LEGAL_RE.test(text.slice(start, e));
       if (!legal && nonSuffix.length === 1 && FIELD_OF_WORK.has(nonSuffix[0].toLowerCase())) return null;
+      if (!legal && PRODUCTS.test(text.slice(start, e).trim())) return null;
       let c;
       if (legal) c = 0.9;
       else c = nonSuffix.length >= 2 ? 0.75 : 0.65;

@@ -11,13 +11,17 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, screen, shell, systemPreferences, nativeImage, session, desktopCapturer } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const capture = require('./src/capture');
 const ocr = require('./src/ocr');
 const { snapshotRows, joinRows } = require('./src/text-layout');
 const { Stitcher, comparableRange } = require('./src/stitch');
+const { detectDocuments } = require('./src/autodetect');
+const { reorderToMatch } = require('./src/reorder');
 const colours = require('./src/label-colors');
 const analyzer = require('./src/analyzer');
+const labelView = require('./src/label-view');
 const Settings = require('./src/settings');
 
 const LIVE_EVERY_MS = 1500;
@@ -34,6 +38,9 @@ let last = null;               // last result sent to the window
 let decided = new Set();       // finding ids the reviewer has answered
 let taskDone = false;          // the window says the task is done
 let liveTimer = null;
+let awayReads = 0;
+let lastHeader = '';           // the pane's file name, read each time: a new name = a new task             // reads in a row where the boxes did not show the task
+let finding = false;
 // The whole documents, built up as the reviewer scrolls.
 const docs = { left: new Stitcher(), right: new Stitcher() };
 
@@ -112,7 +119,8 @@ function stopPicking(saved) {
   if (saved) {
     docs.left.reset();
     docs.right.reset();
-    settings.set({ regions: saved });
+    settings.set({ regions: saved, regionsFrom: 'manual' });
+    lastHeader = '';
     lastPrint = '';
     last = null;
     decided = new Set();
@@ -160,6 +168,22 @@ async function scan(force) {
       send(main, 'status', { state: screenAccess() === 'granted' ? 'blank' : 'permission' });
       return;
     }
+    // A different file name in the pane header means the next task is open: start over.
+    if (shots.header) {
+      const read = await ocr.recognize(shots.header.image.toPNG(), { scale: shots.header.scale < 2 ? 2 : 1 });
+      const name = read.lines.map((l) => l.text).join(' ').toLowerCase().replace(/[^\p{L}\p{N}.]+/gu, '');
+      if (name.length >= 4) {
+        if (lastHeader && name !== lastHeader) {
+          log('new task: the file name in the pane header changed');
+          docs.left.reset();
+          docs.right.reset();
+          decided = new Set();
+          taskDone = false;
+          lastPrint = '';
+        }
+        lastHeader = name;
+      }
+    }
     const print = fingerprint(shots);
     if (!force && print === lastPrint) return;
     send(main, 'status', { state: 'reading' });
@@ -181,18 +205,25 @@ async function scan(force) {
     const leftAdded = docs.left.add(leftRead);
     if (leftAdded === 'new') docs.right.reset();   // a new original means a new task
     // The redacted side only starts over together with the original (a new task).
-    const rightAdded = docs.right.add(rightRead, { mayStartOver: leftAdded === 'new' || !docs.right.rows.length });
+    const rightAdded = docs.right.add(rightRead);
     if (leftAdded === 'ignored' || rightAdded === 'ignored') {
       // Another window in front, a page switching, a half-drawn screen: keep the last result.
       lastPrint = print;
-      log(`read skipped (${leftAdded}/${rightAdded}): the boxes do not show the task right now`);
+      awayReads++;
+      const chars = (rows) => rows.reduce((n, r) => n + r.text.length, 0);
+      log(`read skipped (${leftAdded}/${rightAdded}, ${chars(leftRead)} + ${chars(rightRead)} characters): the boxes do not show the task right now`);
       send(main, 'status', { state: 'away' });
+      // The task moved (window resized, panel moved)? Look for the documents again.
+      if (settings.get().autoFind && awayReads >= 4) { awayReads = 0; setTimeout(() => findDocuments('the boxes stopped showing the task'), 0); }
       return;
     }
+    awayReads = 0;
 
     // Compare only the part read on both sides.
     const leftRows = docs.left.document();
-    const rightRows = docs.right.document();
+    // The redacted document may be laid out in another order: follow the original's.
+    const reordered = reorderToMatch(leftRows, docs.right.document());
+    const rightRows = reordered.rows;
     const range = comparableRange(leftRows, rightRows) || { left: [0, leftRows.length - 1], right: [0, rightRows.length - 1], matched: 0 };
     const lRows = leftRows.slice(range.left[0], range.left[1] + 1);
     const rRows = rightRows.slice(range.right[0], range.right[1] + 1);
@@ -203,6 +234,7 @@ async function scan(force) {
     result.coverage = {
       leftRows: leftRows.length, rightRows: rightRows.length, comparedLeft: lRows.length, comparedRight: rRows.length,
       notComparedLeft: leftRows.length - lRows.length, notComparedRight: rightRows.length - rRows.length,
+      movedRows: reordered.moved,
     };
 
     // Image pixels -> screen points, for the overlay and for "show me" in the window.
@@ -213,6 +245,9 @@ async function scan(force) {
     }
     for (const l of result.labels) { l.rightRects = R(l.rightBoxes); delete l.rightBoxes; }
     for (const k of result.knownNames) { k.leftRects = L(k.leftBoxes); delete k.leftBoxes; }
+    for (const x of result.extras) { x.leftRects = L(x.leftBoxes); x.rightRects = R(x.rightBoxes); delete x.leftBoxes; delete x.rightBoxes; }
+    // What the window shows: each piece of PII with its site label, labeled? redacted?
+    result.view = labelView.build(result, result.extras);
 
     if (last && last.taskKey !== result.taskKey) decided = new Set();
     lastPrint = print;
@@ -235,27 +270,161 @@ async function scan(force) {
   }
 }
 
+// ------------------------------------------------------------------ finding the documents automatically
+
+/**
+ * Reads the whole screen (without this app's windows) and looks for the raw original and
+ * the redacted work side by side. Saves them as the boxes when found.
+ * @returns {boolean} found
+ */
+async function findDocuments(reason) {
+  if (finding || picking) return false;
+  finding = true;
+  send(main, 'status', { state: 'finding' });
+  try {
+    const cursor = screen.getCursorScreenPoint();
+    const displays = [screen.getDisplayNearestPoint(cursor), ...screen.getAllDisplays()]
+      .filter((d, i, all) => all.findIndex((x) => x.id === d.id) === i);
+    for (const d of displays) {
+      const area = d.workArea;
+      const t0 = Date.now();
+      const shot = await capture.grabArea(area);
+      if (capture.looksBlank(shot.image)) continue;
+      const tCap = Date.now();
+      const read = await ocr.recognize(shot.image.toPNG(), { scale: shot.scale < 2 ? 2 : 1 });
+      log(`screen read for finding: ${read.lines.length} lines (capture ${tCap - t0} ms, text ${Date.now() - tCap} ms)`);
+      const found = detectDocuments(read, { scale: shot.scale, origin: { x: area.x, y: area.y } });
+      if (!found) continue;
+      log(`documents found automatically (${reason}): ${size(found.left)} and ${size(found.right)}, match ${found.score}`);
+      docs.left.reset();
+      docs.right.reset();
+      lastPrint = '';
+      awayReads = 0;
+      settings.set({ regions: { left: found.left, right: found.right, ...(found.header ? { header: found.header } : {}) }, regionsFrom: 'auto' });
+      lastHeader = '';
+      pushState();
+      for (const side of ['left', 'right']) overlayFor(screen.getDisplayMatching(found[side]));
+      drawOverlay();
+      for (const w of overlays.values()) send(w, 'overlay:show-frames', null);
+      return true;
+    }
+    log(`no pair of documents found on screen (${reason})`);
+    send(main, 'status', { state: 'notfound' });
+    return false;
+  } catch (err) {
+    if (err && err.code === 'permission') { send(main, 'status', { state: 'permission' }); return false; }
+    log('finding documents failed:', err.message);
+    send(main, 'status', { state: 'error', message: err.message });
+    return false;
+  } finally {
+    finding = false;
+  }
+}
+
+// ------------------------------------------------------------------ reading the whole document
+
+const { execFile } = require('child_process');
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Scroll whatever is under the middle of a box (macOS; needs Accessibility permission). */
+function scrollBox(rect, pixels) {
+  const bin = fs.existsSync(path.join(process.resourcesPath || '', 'bin', 'scroll-mac'))
+    ? path.join(process.resourcesPath, 'bin', 'scroll-mac') : path.join(__dirname, 'bin', 'scroll-mac');
+  const x = Math.round(rect.x + rect.width / 2);
+  const y = Math.round(rect.y + rect.height / 2);
+  return new Promise((resolve) => execFile(bin, [String(x), String(y), String(Math.round(pixels))], { timeout: 10000 }, () => resolve()));
+}
+
+let readingAll = false;
+/**
+ * Pages through both document panes from top to bottom, reading each step, so both
+ * documents are read in full; then scrolls them back to the top.
+ */
+async function readWholeDocument() {
+  const regions = settings.get().regions;
+  if (!regions || readingAll || picking) return;
+  if (process.platform !== 'darwin') { send(main, 'status', { state: 'error', message: 'Reading the whole document automatically is available on macOS.' }); return; }
+  // Sending scroll events needs Accessibility permission; asking shows the system prompt.
+  if (!systemPreferences.isTrustedAccessibilityClient(true)) {
+    log('read whole document: waiting for Accessibility permission');
+    send(main, 'status', { state: 'accessibility' });
+    return;
+  }
+  readingAll = true;
+  const wasLive = settings.get().live;
+  setLive(false);
+  docs.left.reset();
+  docs.right.reset();
+  lastPrint = '';
+  try {
+    const page = (side) => regions[side].height * 0.7;
+    // A picture of the redacted pane, to see whether it moves with the original.
+    const rightPrint = async () => {
+      const shot = await capture.grab(regions);
+      return crypto.createHash('sha1').update(shot.right.image.toBitmap()).digest('hex');
+    };
+    await Promise.all(['left', 'right'].map((side) => scrollBox(regions[side], 30000)));   // to the top
+    await wait(500);
+    let synced = null;   // do the two panes scroll together? (found out on the first step)
+    let still = 0;
+    for (let step = 1; step <= 60 && still < 2; step++) {
+      send(main, 'status', { state: 'reading-all', step });
+      const before = docs.left.rows.length + docs.right.rows.length;
+      await scan(true);
+      const after = docs.left.rows.length + docs.right.rows.length;
+      still = after === before ? still + 1 : 0;
+      if (synced === null) {
+        const r0 = await rightPrint();
+        await scrollBox(regions.left, -page('left'));
+        await wait(450);
+        synced = (await rightPrint()) !== r0;
+        log(`read whole document: the panes ${synced ? 'scroll together' : 'scroll separately'}`);
+        if (!synced) await scrollBox(regions.right, -page('right'));
+      } else if (synced) {
+        await scrollBox(regions.left, -page('left'));
+      } else {
+        await Promise.all(['left', 'right'].map((side) => scrollBox(regions[side], -page(side))));
+      }
+      await wait(450);
+    }
+    log(`read whole document: ${docs.left.rows.length} + ${docs.right.rows.length} lines`);
+    await Promise.all(['left', 'right'].map((side) => scrollBox(regions[side], 30000)));   // back to the top
+    await wait(400);
+    await scan(true);
+  } finally {
+    readingAll = false;
+    setLive(wasLive);
+    send(main, 'status', { state: 'idle' });
+  }
+}
+
 // ------------------------------------------------------------------ overlay
 
-const MARK = {
-  L2: { LEAKAGE: 'leak', INCOHERENT: 'fix', DATATYPE: 'fix', NOT_SENSIBLE: 'fix', OVER_REDACTED: 'over', UNSURE: 'maybe', UNKNOWN_TEXT: 'text' },
-  L1: { PI_TODO: 'pi', BI_TODO: 'bi', CRED_TODO: 'cred', NOT_PII: 'over', CHECK: 'fix' },
-};
+
+// The tab shown on a mark: the label a value needs (left), what is wrong with it (right).
+function itemTags(item) {
+  const problems = [];
+  if (item.labeled === 'no') problems.push('Not labeled');
+  if (item.labeled === 'other') problems.push(`Labeled ${item.rightSite}`);
+  if (item.redaction === 'visible') problems.push('Still visible');
+  if (item.redaction === 'partly') problems.push('Partly visible');
+  if (item.redaction === 'replacement') problems.push('Fix replacement');
+  return { left: item.site, right: problems.length ? `${item.site}: ${problems.join(' · ')}` : `✓ ${item.site}` };
+}
 
 function drawOverlay(flashId) {
   const s = settings.get();
   const marks = [];
-  if (s.overlay && last) {
-    const kinds = MARK[s.stage];
-    for (const f of last[s.stage].findings) {
-      const kind = kinds[f.category];
-      if (!kind) continue;
-      const done = decided.has(f.id);
-      // The status goes on the first box of the side the reviewer acts on (the redacted work when there is one).
-      const tag = analyzer.load().decisions.short(f, s.stage);
-      const tagSide = f.rightRects.length ? 'right' : 'left';
-      f.leftRects.forEach((r, i) => marks.push({ id: f.id, kind, side: 'left', done, tag: tagSide === 'left' && i === 0 ? tag : '', ...r }));
-      f.rightRects.forEach((r, i) => marks.push({ id: f.id, kind, side: 'right', done, tag: tagSide === 'right' && i === 0 ? tag : '', ...r }));
+  if (s.overlay && last && last.view) {
+    for (const item of last.view.items) {
+      const tags = itemTags(item);
+      const done = item.ok;
+      item.leftRects.forEach((r, i) => marks.push({ id: item.id, side: 'left', done, tag: i === 0 ? tags.left : '', ...r }));
+      item.rightRects.forEach((r, i) => marks.push({ id: item.id, side: 'right', done, tag: i === 0 ? tags.right : '', ...r }));
+    }
+    for (const o of last.view.other) {
+      const tag = o.ok ? '✓ Overscrubbed' : o.kind === 'text' ? 'Text changed' : o.marked ? 'Overscrubbed' : 'Not PII — label Overscrubbed or keep';
+      o.rightRects.forEach((r, i) => marks.push({ id: o.id, side: 'right', done: o.ok, tag: i === 0 ? tag : '', ...r }));
     }
   }
   const frames = s.regions && s.overlay ? [{ side: 'left', ...s.regions.left }, { side: 'right', done: taskDone, ...s.regions.right }] : [];
@@ -274,19 +443,29 @@ function drawOverlay(flashId) {
 function pushState() {
   const s = settings.get();
   send(main, 'state', {
-    regions: s.regions, stage: s.stage, live: s.live, overlay: s.overlay, learnedColours: s.learnedColours,
+    regions: s.regions, regionsFrom: s.regionsFrom,
+    canScroll: process.platform === 'darwin' && systemPreferences.isTrustedAccessibilityClient(false), autoFind: s.autoFind, stage: s.stage, live: s.live, overlay: s.overlay, learnedColours: s.learnedColours,
     engine: ocr.engineName(), platform: process.platform, access: screenAccess(), version: app.getVersion(),
   });
 }
 
 function setLive(on) {
   clearInterval(liveTimer);
-  liveTimer = on ? setInterval(() => scan(false), LIVE_EVERY_MS) : null;
+  liveTimer = on ? setInterval(() => { if (!readingAll) scan(false); }, LIVE_EVERY_MS) : null;
 }
 
 ipcMain.handle('app:ready', () => { pushState(); if (last) send(main, 'result', last); });
 ipcMain.handle('app:pick', () => { log('selecting documents'); startPicking(); });
 ipcMain.handle('app:scan', () => scan(true));
+ipcMain.handle('app:find', async () => {
+  const ok = await findDocuments('asked');
+  if (!ok) return false;
+  // Found automatically: read both documents in full right away (when scrolling is allowed).
+  if (process.platform === 'darwin' && systemPreferences.isTrustedAccessibilityClient(false)) await readWholeDocument();
+  else scan(true);
+  return true;
+});
+ipcMain.handle('app:read-all', () => readWholeDocument());
 ipcMain.handle('app:new-task', () => {
   taskDone = false;
   docs.left.reset();
@@ -300,7 +479,7 @@ ipcMain.handle('app:new-task', () => {
 });
 ipcMain.handle('app:set', (_e, patch) => {
   const allowed = {};
-  for (const k of ['stage', 'live', 'overlay']) if (k in patch) allowed[k] = patch[k];
+  for (const k of ['stage', 'live', 'overlay', 'autoFind']) if (k in patch) allowed[k] = patch[k];
   settings.set(allowed);
   if ('live' in allowed) setLive(allowed.live);
   pushState();
@@ -368,6 +547,24 @@ app.whenReady().then(() => {
     const half = Math.floor(w.width / 2);
     settings = { get: () => ({ ...Settings.DEFAULTS, regions: { left: { ...w, width: half }, right: { ...w, x: w.x + half, width: half } } }), set() {} };
     scan(true).then(() => app.quit());
+    return;
+  }
+  // EVARATUS_SELFTEST_FIND=1: look for the documents on screen once, print what was found, quit (settings untouched).
+  if (process.env.EVARATUS_SELFTEST_FIND) {
+    let saved = { ...Settings.DEFAULTS };
+    settings = { get: () => saved, set: (p) => { saved = { ...saved, ...p }; return saved; } };
+    findDocuments('self-test').then(async (ok) => {
+      if (ok) {
+        log('regions:', JSON.stringify(saved.regions));
+        if (process.env.EVARATUS_SELFTEST_FIND === 'all' && systemPreferences.isTrustedAccessibilityClient(false)) await readWholeDocument();
+        else await scan(true);
+        if (last && last.view) {
+          for (const i of last.view.items) log(`  ${i.site.padEnd(20)} ${JSON.stringify(i.text).padEnd(46)} label ${i.labeled.padEnd(5)} ${i.redaction || '-'}`);
+          for (const o of last.view.other) log(`  other: ${o.kind} ${JSON.stringify(o.text)} ${o.rightSite || ''}`);
+        }
+      }
+      app.quit();
+    });
     return;
   }
   // EVARATUS_SELFTEST_PICK=1: open the region picker and drag two boxes with simulated mouse events.

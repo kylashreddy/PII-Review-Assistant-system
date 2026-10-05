@@ -26,13 +26,27 @@ function rows(lines) {
   return out;
 }
 
+// A line OCR could not really read (half-drawn while scrolling, an icon strip):
+// "vulIlnly NuvIlVONIVYMIVHIUIL HVlIVIIUILU". Most long words have no vowels, flip
+// between capitals and small letters, or mix capital I and small l ("lI", "Il").
+function garbled(text) {
+  const words = text.split(/\s+/).filter((w) => /\p{L}{5,}/u.test(w));
+  if (words.length < 2) return false;
+  const bad = words.filter((w) => {
+    const letters = w.replace(/[^\p{L}]/gu, '');
+    const flips = (letters.match(/\p{Ll}\p{Lu}/gu) || []).length;
+    return !/[aeiouy]/i.test(letters) || flips >= 2 || /lI|Il/.test(letters);
+  });
+  return bad.length / words.length >= 0.5;
+}
+
 /**
  * One OCR read -> rows of text: [{text, words:[{start, end, box}], para, top, bottom, clipped}]
  * `para` = a paragraph starts at this row. `clipped` = the row touches the top or bottom
  * edge of the read area, so it may be cut in half.
  */
 function snapshotRows(ocr) {
-  const rs = rows(ocr.lines || []);
+  const rs = rows((ocr.lines || []).filter((l) => !garbled(l.text)));
   return rs.map((row, r) => {
     let text = '';
     const words = [];
@@ -50,7 +64,7 @@ function snapshotRows(ocr) {
     });
     const prev = rs[r - 1];
     const para = Boolean(prev && row.top - prev.bottom > Math.min(row.height, prev.height) * 0.9);
-    const edge = Math.max(2, row.height * 0.15);
+    const edge = Math.max(3, row.height * 0.6);   // a line half hidden at the edge is misread
     const clipped = ocr.height ? row.top <= edge || row.bottom >= ocr.height - edge : false;
     return { text, words, para, top: row.top, bottom: row.bottom, clipped };
   });
@@ -93,4 +107,4 @@ function boxesFor(words, start, end) {
   return [...byRow.values()].map(([x1, y1, x2, y2]) => [x1, y1, x2 - x1, y2 - y1]);
 }
 
-module.exports = { buildText, boxesFor, rows, snapshotRows, joinRows };
+module.exports = { buildText, boxesFor, rows, snapshotRows, joinRows, garbled };

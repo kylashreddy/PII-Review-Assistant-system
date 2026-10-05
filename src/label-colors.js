@@ -12,7 +12,7 @@
 const DEFAULT_PALETTE = {
   'Account Number': '#6d28d9', 'Address': '#dc2626', 'Business Name': '#14b8a6', 'Contact Number': '#f97316',
   'Credentials': '#fb7185', 'Date': '#ec4899', 'Email Address': '#16a34a', 'IP Address': '#22d3ee',
-  'Overscrubbed': '#f9a8b4', 'Person Name': '#2563eb', 'URL/Link': '#f59e0b', 'Person Username': '#3730a3',
+  'Overscrubbed': '#fecdd3', 'Person Name': '#2563eb', 'URL/Link': '#f59e0b', 'Person Username': '#3730a3',
   'Vehicle Number Plate': '#84cc16',
 };
 
@@ -42,6 +42,42 @@ function tintBehind(img, box) {
   if (!total || tinted.length / total < 0.22) return null;
   const median = (k) => tinted.map((c) => c[k]).sort((a, b) => a - b)[tinted.length >> 1];
   return [median(0), median(1), median(2)];
+}
+
+/**
+ * The colour of a line drawn under a word (some labels are an underline, with little or
+ * no fill), or null. Looks at the strip just below the word for a row that is coloured
+ * across most of its width.
+ */
+function underlineBelow(img, box) {
+  const [bx, by, bw, bh] = box.map(Math.round);
+  const [ri, bi] = img.bgra ? [2, 0] : [0, 2];
+  const step = Math.max(1, Math.floor(bw / 16));
+  for (let y = by + bh - 2; y <= Math.min(img.height - 1, by + bh + Math.max(6, Math.round(bh * 0.4))); y++) {
+    const coloured = [];
+    let total = 0;
+    for (let x = Math.max(0, bx + 2); x < Math.min(img.width, bx + bw - 2); x += step) {
+      const o = (y * img.width + x) * 4;
+      const c = [img.data[o + ri], img.data[o + 1], img.data[o + bi]];
+      total++;
+      if (Math.max(...c) - Math.min(...c) >= 18) coloured.push(c);
+    }
+    if (total >= 4 && coloured.length / total >= 0.7) {
+      const median = (k) => coloured.map((c) => c[k]).sort((a, b) => a - b)[coloured.length >> 1];
+      return [median(0), median(1), median(2)];
+    }
+  }
+  return null;
+}
+
+/** Site label for an underline colour: the nearest label colour, if clearly the nearest. */
+function matchUnderline(colour, { learned = {}, palette = DEFAULT_PALETTE } = {}) {
+  const all = [...Object.entries(learned).map(([hex, label]) => [label, hex]), ...Object.entries(palette)]
+    .map(([label, hex]) => ({ label, d: dist(hexToRgb(hex), colour) }))
+    .sort((a, b) => a.d - b.d);
+  if (!all.length || all[0].d > 45) return null;
+  if (all[1] && all[1].label !== all[0].label && all[1].d - all[0].d < 8) return null;
+  return all[0].label;
 }
 
 /** How well `tint` looks like `color` laid over white: {residual, alpha}. */
@@ -80,7 +116,13 @@ function matchLabel(tint, { learned = {}, palette = DEFAULT_PALETTE } = {}) {
 function findLabels(doc, img, options = {}) {
   const tagged = doc.words.map((w) => {
     const tint = tintBehind(img, w.box);
-    return { w, tint, label: tint ? matchLabel(tint, options) : null };
+    let label = tint ? matchLabel(tint, options) : null;
+    if (!label) {
+      const line = underlineBelow(img, w.box);
+      if (line) label = matchUnderline(line, options);
+      if (label) return { w, tint: null, label };
+    }
+    return { w, tint, label };
   });
   const spans = [];
   const unknown = new Map();
@@ -143,4 +185,4 @@ function spansFromRows(rowList, joined) {
   return spans;
 }
 
-module.exports = { DEFAULT_PALETTE, tintBehind, matchLabel, findLabels, labelRows, spansFromRows, asTint, hexToRgb, rgbToHex };
+module.exports = { DEFAULT_PALETTE, tintBehind, underlineBelow, matchUnderline, matchLabel, findLabels, labelRows, spansFromRows, asTint, hexToRgb, rgbToHex };

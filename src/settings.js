@@ -9,6 +9,8 @@ const DEFAULTS = {
   stage: 'L2',            // 'L1' identify, 'L2' verify
   live: true,             // re-read the screen when it changes
   overlay: true,          // marks drawn over the documents
+  autoFind: true,         // look for the documents again when the boxes stop showing them
+  regionsFrom: null,      // 'auto' | 'manual'
   learnedColours: {},     // '#rrggbb' -> site label name
   extraKnownNames: [],
 };

@@ -1,9 +1,7 @@
 // Main window: choose the two documents, see what the check found, answer each item.
-// The questions, answers and their meaning come from the extension's panel/decisions.js,
-// so the desktop app and the extension ask reviewers exactly the same thing.
+// For every piece of PII in the raw original: the label it needs (the review site's own
+// label names), whether the redacted work has that label, and whether it is redacted.
 'use strict';
-const P = window.PIIRA;
-const D = P.decisions;
 const api = window.evaratus || demoBridge();
 
 const ui = {
@@ -11,7 +9,7 @@ const ui = {
   result: null,       // last check
   status: 'idle',     // idle | reading | permission | blank | error
   error: '',
-  verdicts: new Map(),
+  step: 0,           // page while reading the whole document
   taskKey: null,
   filter: null,       // section key shown alone, or null for all
   expanded: new Set(),
@@ -38,8 +36,6 @@ const ago = (t) => {
 };
 const size = (r) => `${Math.round(r.width)} × ${Math.round(r.height)} pt`;
 
-// Black and white: the most serious statuses are bold, the done ones grey.
-const STATUS_TONE = { LEAKAGE: 'bad', CRED_TODO: 'bad', DATATYPE: 'bad', IDENTIFIED: 'good', REDACTED_OK: 'good' };
 
 // ------------------------------------------------------------------ render
 function render() {
@@ -47,7 +43,7 @@ function render() {
   const scrollTop = main.scrollTop;
   main.replaceChildren(...view().filter(Boolean));
   main.scrollTop = scrollTop;
-  if (ui.result && ui.state && ui.state.regions) announce();
+  if (ui.result && ui.result.view && ui.state && ui.state.regions) announce(ui.result.view);
   renderLivePill();
   const s = ui.state;
   document.getElementById('engine').textContent = s ? `OCR: ${s.engine}` : '';
@@ -60,11 +56,12 @@ function view() {
   if (!s.regions) return [welcome()];
   const out = [documentsCard(), statusNotice()];
   const r = ui.result;
-  if (!r) {
-    out.push(ui.status === 'reading' || ui.status === 'idle' ? h('div', { class: 'skeleton' }) : null);
+  if (!r || !r.view) {
+    out.push(['reading', 'idle', 'finding', 'reading-all'].includes(ui.status) ? h('div', { class: 'skeleton' }) : null);
     return out;
   }
-  out.push(doneCard(), summaryCard(), taskNotice(r), coloursCard(r), filterChips(), ...sections());
+  const v = r.view;
+  out.push(doneCard(v), summaryCard(v), taskNotice(r), coloursCard(r), filterChips(v), ...labelGroups(v));
   return out;
 }
 
@@ -73,12 +70,20 @@ function welcome() {
     h('span', { class: 'wordmark', role: 'img', 'aria-label': 'scaler ai labs' }),
     h('div', { class: 'kicker' }, 'Evaratus Review'),
     h('h1', {}, 'Check redactions on screen'),
-    h('p', {}, 'Evaratus Review reads the original and the redacted document from your screen and shows what still needs fixing.'),
+    h('p', {}, 'Evaratus Review reads the two documents of a task from your screen and shows what still needs fixing.'),
     h('ol', { class: 'howto' },
-      h('li', {}, h('div', { class: 'n' }, '1'), h('div', {}, h('b', {}, 'Open a task'), h('span', {}, 'Any app or website, with both documents visible side by side.'))),
-      h('li', {}, h('div', { class: 'n' }, '2'), h('div', {}, h('b', {}, 'Select the two documents'), h('span', {}, 'Drag a box around the original, then around the redacted work.'))),
-      h('li', {}, h('div', { class: 'n' }, '3'), h('div', {}, h('b', {}, 'Review the findings'), h('span', {}, 'Problems are marked on the documents and listed here. Scroll — it keeps up.')))),
-    h('button', { class: 'btn primary big', onclick: () => api.pickRegions() }, '⌖  Select documents on screen'));
+      h('li', {}, h('div', { class: 'n' }, '1'), h('div', {}, h('b', {}, 'Open a task'),
+        h('span', {}, 'Left: the raw original (no labels). Right: the PII-redacted work, with its labels. Side by side, in any app or website.'))),
+      h('li', {}, h('div', { class: 'n' }, '2'), h('div', {}, h('b', {}, 'Find the documents'),
+        h('span', {}, 'Let the app detect them automatically, or draw the two boxes yourself.'))),
+      h('li', {}, h('div', { class: 'n' }, '3'), h('div', {}, h('b', {}, 'Scroll and review'),
+        h('span', {}, 'Problems are marked on the documents and listed here. When nothing is left, it says Redaction done.')))),
+    h('div', { class: 'welcome-actions' },
+      h('button', { class: 'btn primary big', onclick: () => api.findDocuments(), disabled: ui.status === 'finding' },
+        ui.status === 'finding' ? 'Looking for the documents…' : '◎  Detect documents automatically'),
+      h('button', { class: 'btn big', onclick: () => api.pickRegions() }, '⌖  Select manually')),
+    ui.status === 'notfound' ? h('p', { class: 'welcome-note' },
+      'No pair of documents found. Open the task so both documents are visible side by side, then try again — or select them manually.') : null);
 }
 
 function permissionCard() {
@@ -95,23 +100,26 @@ function permissionCard() {
 function documentsCard() {
   const s = ui.state;
   const r = ui.result;
+  const busy = ['finding', 'reading-all'].includes(ui.status);
   return h('div', { class: 'card' },
-    h('h2', {}, 'Documents', h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', onclick: () => api.showRegions() }, 'Show on screen')),
+    h('h2', {}, 'Documents', h('span', { class: 'from' }, s.regionsFrom === 'auto' ? 'found automatically' : s.regionsFrom === 'manual' ? 'selected by you' : ''),
+      h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', onclick: () => api.showRegions() }, 'Show on screen')),
     h('div', { class: 'docs' },
-      h('div', { class: 'doc-tile left' }, h('div', { class: 'k' }, h('i'), 'Original'),
-        h('div', { class: 'v' }, r ? `${r.leftChars.toLocaleString()} characters read` : size(s.regions.left))),
-      h('div', { class: 'doc-tile right' }, h('div', { class: 'k' }, h('i'), 'Redacted'),
-        h('div', { class: 'v' }, r ? `${r.labels.length} label${r.labels.length === 1 ? '' : 's'} · ${r.rightChars.toLocaleString()} chars` : size(s.regions.right)))),
-    h('div', { class: 'segmented' },
-      stageButton('L1', 'L1 · Identify', 'Is it labeled?'),
-      stageButton('L2', 'L2 · Verify', 'Is it redacted right?')),
+      h('div', { class: 'doc-tile left' }, h('div', { class: 'k' }, h('i'), 'Original'), h('div', { class: 'sub' }, 'raw · no labels'),
+        h('div', { class: 'v' }, r && r.coverage ? `${r.coverage.leftRows} lines read` : size(s.regions.left))),
+      h('div', { class: 'doc-tile right' }, h('div', { class: 'k' }, h('i'), 'Redacted'), h('div', { class: 'sub' }, 'PII replaced · labeled'),
+        h('div', { class: 'v' }, r && r.coverage ? `${r.coverage.rightRows} lines · ${r.labels.length} label${r.labels.length === 1 ? '' : 's'}` : size(s.regions.right)))),
     h('div', { class: 'controls' },
-      h('button', { class: 'btn', onclick: () => api.pickRegions() }, '⌖ Reselect'),
-      h('button', { class: 'btn', onclick: () => api.scan(), disabled: ui.status === 'reading' }, ui.status === 'reading' ? 'Reading…' : '⟳ Read'),
-      h('button', { class: 'btn', onclick: () => api.newTask(), title: 'Forget what was read and start reading the next task' }, 'New task'),
-      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn primary', onclick: () => api.readAll(), disabled: busy, title: 'Scroll both documents from top to bottom and read them in full' },
+        ui.status === 'reading-all' ? `Reading… page ${ui.step || 1}` : '⇣ Read whole document'),
+      h('button', { class: 'btn', onclick: () => api.findDocuments(), disabled: busy, title: 'Find the two documents on screen automatically' },
+        ui.status === 'finding' ? 'Finding…' : '◎ Detect'),
+      h('button', { class: 'btn', onclick: () => api.pickRegions(), disabled: busy, title: 'Draw the two boxes yourself' }, '⌖ Select'),
+      h('button', { class: 'btn', onclick: () => api.newTask(), disabled: busy, title: 'Forget what was read and start reading the next task' }, 'New task')),
+    h('div', { class: 'controls' },
       toggle('Live', s.live, () => api.set({ live: !s.live }), 'Re-read the documents whenever they change (e.g. when you scroll)'),
-      toggle('Marks', s.overlay, () => api.set({ overlay: !s.overlay }), 'Draw boxes around findings on the documents')),
+      toggle('Marks', s.overlay, () => api.set({ overlay: !s.overlay }), 'Show the labels and problems on the documents'),
+      toggle('Auto-find', s.autoFind, () => api.set({ autoFind: !s.autoFind }), 'Find the documents again automatically when the task moves on screen')),
     r ? coverage(r) : null);
 }
 
@@ -123,13 +131,11 @@ function coverage(r) {
   const gap = Math.max(c.notComparedLeft, c.notComparedRight);
   return h('div', { class: 'coverage' },
     h('div', { class: 'meta' }, `Read so far: original ${c.leftRows} lines · redacted ${c.rightRows} lines · compared ${c.comparedLeft} lines · ${ago(r.readAt)}`),
+    c.movedRows ? h('div', { class: 'meta' }, `The redacted document is laid out differently: ${c.movedRows} of its lines were lined up with the original before comparing.`) : null,
     gap > 0 ? h('div', { class: 'meta strong' }, `${gap} line${gap === 1 ? '' : 's'} read on one side only — scroll the ${behind} document to the same place to compare them.`)
       : h('div', { class: 'meta' }, 'Scroll through both documents to read them in full; new lines are added as they appear.'));
 }
 
-function stageButton(stage, title, sub) {
-  return h('button', { class: ui.state.stage === stage ? 'on' : '', onclick: () => api.set({ stage }) }, title, h('small', {}, sub));
-}
 function toggle(label, on, onclick, title) {
   return h('button', { class: 'switch' + (on ? ' on' : ''), onclick, title, 'aria-pressed': String(Boolean(on)) }, h('i'), label);
 }
@@ -138,6 +144,20 @@ function statusNotice() {
   if (ui.status === 'blank') {
     return h('div', { class: 'notice warn' }, h('div', { class: 'ic' }, '⚠'),
       h('div', {}, h('b', {}, 'The selected areas look empty'), h('p', {}, 'Is the task still open where you selected it? Reselect the documents if the window moved.')));
+  }
+  if (ui.status === 'accessibility') {
+    return h('div', { class: 'notice' }, h('div', { class: 'ic' }, '⇣'),
+      h('div', {}, h('b', {}, 'Allow scrolling to read the whole document'),
+        h('p', {}, 'To page through the documents by itself, the app needs Accessibility permission: System Settings → Privacy & Security → Accessibility → turn on Electron (Evaratus Review once installed). Then press “Read whole document” again.')));
+  }
+  if (ui.status === 'reading-all') {
+    return h('div', { class: 'notice' }, h('div', { class: 'ic' }, '⇣'),
+      h('div', {}, h('b', {}, `Reading the whole document… page ${ui.step || 1}`),
+        h('p', {}, 'Both documents are being scrolled from top to bottom. Please don\u2019t scroll or switch windows until it finishes.')));
+  }
+  if (ui.status === 'notfound') {
+    return h('div', { class: 'notice' }, h('div', { class: 'ic' }, '◎'),
+      h('div', {}, h('b', {}, 'No pair of documents found on screen'), h('p', {}, 'Bring the task to the front with both documents visible, then press Detect — or Select them manually.')));
   }
   if (ui.status === 'away') {
     return h('div', { class: 'notice' }, h('div', { class: 'ic' }, '◌'),
@@ -150,91 +170,115 @@ function statusNotice() {
   return null;
 }
 
-function stageFindings() {
-  return ui.result ? ui.result[ui.state.stage].findings : [];
-}
-function decidable(f) { return Boolean(D.question(f, ui.state.stage)); }
 
-/**
- * Is the task done? (stage L2: the redaction on the right; L1: the labels.)
- *   'done'      nothing to fix was found
- *   'reviewed'  findings were raised, the reviewer answered all of them, and none needs a fix
- *   'fix'       the reviewer's answers say something must be fixed on the right
- *   'open'      findings still to look at
- * Task-level notes (other language, unstructured text) and text added or missing on the
- * right are problems in their own right, so they keep a task from being done.
- */
-function completion() {
-  const stage = ui.state.stage;
-  const findings = stageFindings();
-  const issues = findings.filter(D.isIssue);
-  const blocking = issues.filter((f) => !decidable(f));          // nothing to answer: must be fixed
-  const t = D.summary(findings, stage, ui.verdicts);
+// ------------------------------------------------------------------ the labels
+
+const LABEL_STATUS = {
+  yes: (i) => ['✓ Labeled', 'good'],
+  no: (i) => ['✗ Not labeled', 'bad'],
+  other: (i) => [`≠ Labeled ${i.rightSite}`, 'bad'],
+};
+const REDACTION_STATUS = {
+  redacted: ['✓ Redacted', 'good'],
+  visible: ['⚠ Still visible', 'bad'],
+  partly: ['⚠ Partly visible', 'bad'],
+  replacement: ['⚠ Fix the replacement', 'bad'],
+};
+
+function doneCard(v) {
+  if (!v.done || !v.items.length) return null;
   const c = ui.result.coverage || {};
   const oneSided = Math.max(c.notComparedLeft || 0, c.notComparedRight || 0);
-  const okCount = findings.length - issues.length;
-  let state;
-  if (!issues.length) state = 'done';
-  else if (blocking.length || t.fix) state = 'fix';
-  else if (issues.every((f) => ui.verdicts.has(f.id))) state = 'reviewed';
-  else state = 'open';
-  return { state, okCount, fixes: t.fix + blocking.length, oneSided, lines: c.comparedLeft || 0 };
-}
-
-function doneCard() {
-  const c = completion();
-  if (c.state !== 'done' && c.state !== 'reviewed') return null;
-  const stage = ui.state.stage;
-  const what = stage === 'L1' ? 'Identification done' : 'Redaction done';
-  const detail = stage === 'L1'
-    ? `All PII (personal and business) in the original is labeled — ${c.okCount} value${c.okCount === 1 ? '' : 's'}.`
-    : `All PII and business PII on the right is redacted correctly — ${c.okCount} value${c.okCount === 1 ? '' : 's'} replaced consistently.`;
   return h('div', { class: 'done-card' },
     h('div', { class: 'done-mark' }, '✓'),
     h('div', {},
-      h('div', { class: 'done-title' }, what + (c.state === 'reviewed' ? ' (after your review)' : '')),
-      h('div', { class: 'done-text' }, detail),
-      h('div', { class: 'done-scope' }, c.oneSided
-        ? `Checked ${c.lines} lines. ${c.oneSided} more line${c.oneSided === 1 ? ' was' : 's were'} read on one side only — scroll both documents to the end before submitting.`
-        : `Checked the ${c.lines} lines read on both sides. Make sure you scrolled both documents to the end, then submit on the site.`)));
+      h('div', { class: 'done-title' }, 'Redaction done'),
+      h('div', { class: 'done-text' }, `All ${v.counts.pii} PII value${v.counts.pii === 1 ? ' is' : 's are'} labeled correctly and redacted on the right.`),
+      h('div', { class: 'done-scope' }, oneSided
+        ? `${oneSided} line${oneSided === 1 ? ' was' : 's were'} read on one side only — read the whole document before submitting.`
+        : `Checked the ${c.comparedLeft || 0} lines read. Use “Read whole document” to be sure everything was read, then submit on the site.`)));
 }
 
-function summaryCard() {
-  const stage = ui.state.stage;
-  const findings = stageFindings();
-  const issues = findings.filter(D.isIssue);
-  // Still to look at: issues not answered yet, and issues there is nothing to answer for.
-  const open = issues.filter((f) => !decidable(f) || !ui.verdicts.has(f.id));
-  const ok = findings.length - issues.length;
-  const t = D.summary(findings, stage, ui.verdicts);
-  const total = findings.filter(decidable).length;
-  const answered = total - t.open;
-  return h('div', { class: 'card' },
-    h('div', { class: 'summary' },
-      h('div', { class: 'big-num' + (open.length ? '' : ' zero') }, String(open.length)),
-      h('div', {}, h('div', { style: 'font-weight:700' }, open.length ? 'left to check' : issues.length ? 'All checked' : 'Nothing to check'),
-        h('div', { class: 'what' }, stage === 'L1' ? 'PII in the original, against the labels' : 'Redacted work, against the original')),
-      h('div', { class: 'ok' }, h('b', {}, String(ok)), h('div', { class: 'what' }, stage === 'L1' ? 'identified' : 'redacted right'))),
-    h('div', { class: 'progress' }, h('i', { style: `width:${total ? Math.round((answered / total) * 100) : 0}%` })),
-    h('div', { class: 'decided-line' }, h('span', {}, `${answered} of ${total} answered`),
-      h('span', {}, t.fix ? `${t.fix} to fix on the right` : answered ? 'No fixes so far' : '')));
+function summaryCard(v) {
+  const c = v.counts;
+  const stat = (n, label, bad) => h('div', { class: 'stat' + (bad && n ? ' bad' : '') }, h('b', {}, String(n)), h('span', {}, label));
+  return h('div', { class: 'card summary-grid' },
+    stat(c.pii, 'PII found'),
+    stat(c.labeled, 'labeled right'),
+    stat(c.pii - c.labeled, 'label missing', true),
+    stat(c.visible, 'still visible', true));
 }
 
-// Tell the reviewer (and the marks on screen) when the task becomes done, once per task.
+function filterChips(v) {
+  const problems = v.items.filter((i) => !i.ok).length + v.other.filter((o) => !o.ok).length;
+  const chip = (key, label, n) => h('button', {
+    class: 'chip' + (ui.filter === key ? ' on' : ''), onclick: () => { ui.filter = key; render(); },
+  }, label, h('b', {}, String(n)));
+  return h('div', { class: 'chips' }, chip(null, 'All', v.items.length + v.other.length), chip('problems', 'Problems only', problems));
+}
+
+function labelGroups(v) {
+  const show = (x) => ui.filter !== 'problems' || !x.ok;
+  const groups = new Map();
+  for (const it of v.items) if (show(it)) (groups.get(it.site) || groups.set(it.site, []).get(it.site)).push(it);
+  const out = [];
+  for (const [site, items] of groups) {
+    const bad = items.filter((i) => !i.ok).length;
+    out.push(h('details', { class: 'section' + (bad ? '' : ' ok'), open: true },
+      h('summary', {}, h('span', { class: 'dot' }), site, h('span', { class: 'count' }, bad ? `${bad} to fix · ${items.length}` : `✓ ${items.length}`)),
+      items.map(labelRow)));
+  }
+  const other = v.other.filter(show);
+  if (other.length) {
+    out.push(h('details', { class: 'section' + (other.some((o) => !o.ok) ? '' : ' ok'), open: true },
+      h('summary', {}, h('span', { class: 'dot' }), 'Changed on the right, but not PII', h('span', { class: 'count' }, String(other.length))),
+      h('div', { class: 'hint' }, 'Words replaced on the right that are not PII. Keep the original words, or mark them Overscrubbed.'),
+      other.map(otherRow)));
+  }
+  if (!out.length) {
+    out.push(h('div', { class: 'card empty-state' }, v.items.length ? h('b', {}, '✓ No problems') : h('b', {}, 'No PII found yet'),
+      v.items.length ? 'Everything read so far is labeled and redacted.' : 'Nothing that looks like PII in what was read so far.'));
+  }
+  return out;
+}
+
+function labelRow(it) {
+  const [lt, lc] = LABEL_STATUS[it.labeled](it);
+  const red = it.redaction && REDACTION_STATUS[it.redaction];
+  const open = ui.expanded.has(it.id);
+  return h('div', { class: 'item' + (it.ok ? ' done' : '') },
+    h('div', { class: 'line1', title: 'Show on the documents', onclick: () => api.flash(it.id) },
+      h('span', { class: 'quote' }, `“${it.text.length > 60 ? it.text.slice(0, 60) + '…' : it.text}”`)),
+    h('div', { class: 'choices' },
+      h('span', { class: 'pill ' + lc }, lt),
+      red ? h('span', { class: 'pill ' + red[1] }, red[0]) : null,
+      it.note ? h('button', { class: 'btn ghost more', onclick: () => { open ? ui.expanded.delete(it.id) : ui.expanded.add(it.id); render(); } }, open ? 'Less ▴' : 'Why ▸') : null),
+    open ? h('div', { class: 'details' }, h('div', { class: 'full' }, it.text), h('div', {}, it.note)) : null);
+}
+
+function otherRow(o) {
+  const open = ui.expanded.has(o.id);
+  const status = o.ok ? ['✓ Marked Overscrubbed', 'good'] : o.kind === 'text' ? ['Text changed', 'bad']
+    : o.rightSite && !o.marked ? [`Labeled ${o.rightSite}`, 'bad'] : ['Not PII — keep it, or label Overscrubbed', 'bad'];
+  return h('div', { class: 'item' + (o.ok ? ' done' : '') },
+    h('div', { class: 'line1', onclick: () => api.flash(o.id) }, h('span', { class: 'quote' }, `“${o.text}”`)),
+    h('div', { class: 'choices' }, h('span', { class: 'pill ' + status[1] }, status[0]),
+      o.knownName ? h('span', { class: 'pill' }, 'Known company') : null,
+      o.note ? h('button', { class: 'btn ghost more', onclick: () => { open ? ui.expanded.delete(o.id) : ui.expanded.add(o.id); render(); } }, open ? 'Less ▴' : 'Why ▸') : null),
+    open ? h('div', { class: 'details' }, h('div', {}, o.note)) : null);
+}
+
+// Tell the reviewer once per task when nothing is left to fix.
 let announced = '';
-function announce() {
-  if (!ui.result || !ui.state) return;
-  const c = completion();
-  const done = c.state === 'done' || c.state === 'reviewed';
+function announce(v) {
+  const done = v.done && v.items.length > 0;
   api.setDone(done);
-  const key = `${ui.taskKey}|${ui.state.stage}`;
-  if (!done) { if (announced === key) announced = ''; return; }
-  if (announced === key) return;
-  announced = key;
-  const title = ui.state.stage === 'L1' ? 'Identification done' : 'Redaction done';
+  if (!done) { if (announced === ui.taskKey) announced = ''; return; }
+  if (announced === ui.taskKey) return;
+  announced = ui.taskKey;
   try {
-    new Notification(title, { body: c.oneSided ? 'Scroll both documents to the end to be sure, then submit on the site.' : 'All PII is handled. You can submit on the site.', silent: false });
-  } catch (e) { /* notifications not allowed: the card in the window still shows it */ }
+    new Notification('Redaction done', { body: `All ${v.counts.pii} PII values are labeled and redacted. You can submit on the site.` });
+  } catch (e) { /* notifications off: the card in the window still shows it */ }
 }
 
 function taskNotice(r) {
@@ -264,75 +308,10 @@ function coloursCard(r) {
           h('option', { value: '' }, 'Which label?'), names.map((n) => h('option', { value: n }, n)))))));
 }
 
-function filterChips() {
-  const stage = ui.state.stage;
-  const findings = stageFindings();
-  const count = (k) => findings.filter((f) => f.category === k).length;
-  const chip = (key, label, n) => h('button', {
-    class: 'chip' + (ui.filter === key ? ' on' : ''),
-    onclick: () => { ui.filter = ui.filter === key ? null : key; render(); },
-  }, label, h('b', {}, String(n)));
-  return h('div', { class: 'chips' },
-    chip(null, 'All', findings.length),
-    // Only categories with something in them: an empty filter is just noise.
-    D.sections(stage).filter((s) => count(s.key)).map((s) => chip(s.key, s.title.replace(/^PII – /, ''), count(s.key))));
-}
-
-function sections() {
-  const stage = ui.state.stage;
-  const findings = stageFindings();
-  const out = [];
-  for (const s of D.sections(stage)) {
-    if (ui.filter && ui.filter !== s.key) continue;
-    const items = findings.filter((f) => f.category === s.key);
-    if (!items.length) continue;
-    out.push(h('details', { class: 'section' + (s.ok ? ' ok' : ''), open: !s.ok || ui.filter === s.key },
-      h('summary', {}, h('span', { class: 'dot' }), s.title.replace(/^PII – /, ''), h('span', { class: 'count' }, String(items.length))),
-      h('div', { class: 'hint' }, s.hint),
-      items.map(item)));
-  }
-  if (!out.length) {
-    out.push(h('div', { class: 'card empty-state' }, h('b', {}, '✓ All clear'), 'Nothing found in the visible part of the documents.'));
-  }
-  return out;
-}
-
-function item(f) {
-  const stage = ui.state.stage;
-  const q = D.question(f, stage);
-  const verdict = ui.verdicts.get(f.id);
-  const outcome = q ? D.outcome(f, stage, verdict) : null;
-  const sugg = D.suggested(f, stage);
-  const open = ui.expanded.has(f.id);
-  const quote = f.text.length > 70 ? f.text.slice(0, 70) + '…' : f.text;
-  const choose = (key) => () => {
-    if (ui.verdicts.get(f.id) === key) ui.verdicts.delete(f.id); else ui.verdicts.set(f.id, key);
-    api.decided([...ui.verdicts.keys()]);
-    render();
-  };
-  return h('div', { class: 'item' + (verdict ? ' done' : '') },
-    h('div', { class: 'line1', title: 'Show on screen', onclick: () => api.flash(f.id) },
-      h('span', { class: 'tag' + (f.label ? '' : ' outline') }, f.label || 'Text'),
-      h('span', { class: 'quote' }, `“${quote}”`),
-      h('span', { class: 'status ' + (STATUS_TONE[f.category] || '') }, D.short(f, stage))),
-    h('div', { class: 'choices' },
-      q ? [q.yes, q.no].map((c, i) => h('button', {
-        class: `choice ${i === 0 ? 'yes' : 'no'}${verdict === c.key ? ' on' : ''}${sugg === c.key && !verdict ? ' suggested' : ''}`,
-        title: c.title + (sugg === c.key ? ' (suggested)' : ''), onclick: choose(c.key),
-      }, c.label)) : null,
-      outcome ? h('span', { class: 'outcome ' + (outcome.fix ? 'fix' : 'ok') }, outcome.fix ? '✎ ' + outcome.text.replace(/^To do: /, '') : '✓ ' + outcome.text) : null,
-      h('button', { class: 'btn ghost more', onclick: () => { open ? ui.expanded.delete(f.id) : ui.expanded.add(f.id); render(); } }, open ? 'Less ▴' : 'Details ▸')),
-    open ? h('div', { class: 'details' },
-      h('div', { class: 'full' }, f.text),
-      f.note ? h('div', {}, f.note) : null,
-      q ? h('div', {}, q.suggestion) : null,
-      f.confidence != null ? h('div', {}, `${Math.round(f.confidence * 100)}% sure · ${f.source || 'rule'}`) : null) : null);
-}
-
 function renderLivePill() {
   const pill = document.getElementById('livePill');
   const s = ui.state;
-  const reading = ui.status === 'reading';
+  const reading = ui.status === 'reading' || ui.status === 'finding';
   pill.className = 'live-pill' + (reading ? ' busy' : s && s.live && s.regions ? ' on' : '');
   pill.lastChild.textContent = reading ? 'Reading' : s && s.live && s.regions ? 'Live' : 'Paused';
 }
@@ -344,12 +323,13 @@ api.onState((s) => {
   render();
 });
 api.onResult((r) => {
-  if (r.taskKey !== ui.taskKey) { ui.taskKey = r.taskKey; ui.verdicts.clear(); ui.expanded.clear(); }
+  if (r.taskKey !== ui.taskKey) { ui.taskKey = r.taskKey; ui.expanded.clear(); }
   ui.result = r;
   render();
 });
 api.onStatus((st) => {
   ui.status = st.state;
+  ui.step = st.step || 0;
   ui.error = st.message || '';
   render();
 });
@@ -365,7 +345,7 @@ function demoBridge() {
   const params = new URLSearchParams(location.search);
   const loadDemo = () => fetch('demo-data.json').then((r) => r.json()).then((r) => {
     // ?demo=done: the same task with every redaction correct.
-    if (params.get('demo') === 'done') r.L2.findings = r.L2.findings.filter((f) => f.category === 'REDACTED_OK');
+    if (params.get('demo') === 'done') { r.view.items.forEach((i) => { i.ok = true; i.labeled = 'yes'; i.redaction = 'redacted'; }); r.view.other = []; r.view.done = true; r.view.counts = { ...r.view.counts, labeled: r.view.counts.pii, visible: 0, problems: 0 }; }
     emit('result', { ...r, readAt: Date.now(), coverage: { leftRows: 7, rightRows: 7, comparedLeft: 7, comparedRight: 7, notComparedLeft: 0, notComparedRight: 0 } });
   });
   return {
@@ -374,8 +354,9 @@ function demoBridge() {
       if (params.get('demo') === 'permission') state.access = 'denied';
       emit('state', { ...state });
     },
+    findDocuments() { state.regionsFrom = 'auto'; this.pickRegions(); },
     pickRegions() { state.regions = { left: { width: 620, height: 780 }, right: { width: 620, height: 780 } }; emit('state', { ...state }); loadDemo(); },
-    showRegions() {}, scan() { loadDemo(); }, newTask() { loadDemo(); }, setDone() {}, decided() {}, flash() {}, learnColour() {}, forgetColours() {}, openPermissions() {},
+    showRegions() {}, scan() { loadDemo(); }, newTask() { loadDemo(); }, setDone() {}, readAll() { loadDemo(); }, decided() {}, flash() {}, learnColour() {}, forgetColours() {}, openPermissions() {},
     set(patch) { Object.assign(state, patch); emit('state', { ...state }); },
     palette: async () => ({ 'Person Name': '#2563eb', 'Email Address': '#16a34a', 'Contact Number': '#f97316', 'Business Name': '#14b8a6' }),
     onState: (fn) => listeners.state.push(fn), onResult: (fn) => listeners.result.push(fn), onStatus: (fn) => listeners.status.push(fn),

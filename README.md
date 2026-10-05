@@ -44,6 +44,27 @@ Screen Recording → turn on **Electron**, then run `npm start` again.
 - Answer each finding with the two buttons; the dashed one is the app's suggestion. **Details** shows why.
 - A highlight colour the app doesn't know appears under **Teach label colours** — pick its label once.
 
+## Layout differences
+
+The redacted document is often re-made, so its layout differs from the original. The app handles:
+
+- **Blocks in another order** — the redacted lines are put in the original's order before comparing
+  (each line next to its counterpart; replaced values travel with the line before them).
+- **Lines wrapped or split differently** — text found elsewhere on the other side counts as moved, not missing.
+- **Panes that scroll together** — "Read whole document" notices it and scrolls only once per page.
+- **Blank stretches, page gaps, repeated bullets** — reads with too little text are skipped; repeated
+  lines are placed by their neighbours.
+- **Fast scrolling** — a read that does not overlap the previous one is kept as its own piece and joined
+  up later, so nothing is lost. A new task is noticed from the file name in the pane header.
+
+## Not over-detecting
+
+Tested on a real review task (a screen recording, scrolled through end to end). Not reported, because
+they are not PII problems: text the new layout moved or split, words OCR reads slightly differently
+("APIs" / "APls", "CAREERHIGHLIGHTS" / "CAREER HIGHLIGHTS"), sentences paired with unrelated text by a
+layout change, unreadable OCR lines and half-visible lines at the pane edges, and software products
+such as "Visual Studio". Labels drawn as an underline (Overscrubbed) are recognised as well as filled ones.
+
 ## Good to know
 
 - Lines are matched by their text, so scroll at a normal pace: each read should overlap the previous one.
